@@ -21,8 +21,32 @@ def _to_numpy(matrix):
     return matrix
 
 
-def get_ica_matrix(adata, *, use_highly_variable=True, layer=None):
-    if layer is not None:
+def orient_ica_matrix(matrix, space):
+    if space == "gene":
+        return matrix
+    if space == "cell":
+        return matrix.T
+    raise ValueError("space must be either 'gene' or 'cell'.")
+
+
+def get_ica_matrix(
+    adata, *, use_highly_variable=True, layer=None, use_pca=False, center=True
+):
+    if use_pca and layer is not None:
+        raise ValueError("layer cannot be used together with use_pca=True.")
+
+    if use_highly_variable and "highly_variable" in adata.var:
+        feature_mask = adata.var["highly_variable"].to_numpy(dtype=bool)
+        if not feature_mask.any():
+            raise ValueError("No genes are marked as highly_variable=True.")
+    else:
+        feature_mask = np.ones(adata.n_vars, dtype=bool)
+
+    if use_pca:
+        if "X_pca" not in adata.obsm:
+            raise KeyError("PCA scores 'X_pca' were not found in adata.obsm.")
+        matrix = adata.obsm["X_pca"]
+    elif layer is not None:
         if layer not in adata.layers:
             raise KeyError(f"Layer {layer!r} was not found in adata.layers.")
         matrix = adata.layers[layer]
@@ -34,13 +58,8 @@ def get_ica_matrix(adata, *, use_highly_variable=True, layer=None):
         if callable(get):
             matrix = get()
 
-    if use_highly_variable and "highly_variable" in adata.var:
-        feature_mask = adata.var["highly_variable"].to_numpy(dtype=bool)
-        if not feature_mask.any():
-            raise ValueError("No genes are marked as highly_variable=True.")
-    else:
-        feature_mask = np.ones(adata.n_vars, dtype=bool)
-    matrix = matrix[:, feature_mask]
+    if not use_pca:
+        matrix = matrix[:, feature_mask]
     matrix = _to_numpy(matrix)
     matrix = np.asarray(matrix)
     if matrix.dtype == object and any(
@@ -60,9 +79,15 @@ def get_ica_matrix(adata, *, use_highly_variable=True, layer=None):
                 dense_matrix[index] = value
         matrix = dense_matrix
     matrix = np.asarray(matrix, dtype=np.float64).copy()
-    if matrix.ndim != 2 or not np.isfinite(matrix).all():
+    if (
+        matrix.ndim != 2
+        or matrix.shape[0] != adata.n_obs
+        or matrix.shape[1] == 0
+        or not np.isfinite(matrix).all()
+    ):
         raise ValueError("ICA input must be a finite two-dimensional matrix.")
-    matrix -= matrix.mean(axis=0, keepdims=True)
+    if center:
+        matrix -= matrix.mean(axis=0, keepdims=True)
     return matrix, feature_mask
 
 

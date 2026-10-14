@@ -8,7 +8,7 @@ from .pieparty import pieparty_from_adata
 from .plot_cluster_distribution import plot_cluster_distribution
 from .plot_cluster_trends import plot_cluster_trends
 from .plot_score_component_associations import plot_score_component_associations
-from .plot_stability import plot_mean_stability_index
+from .plot_stability import plot_all_stability_indices, plot_mean_stability_index
 from .split_dim_plot import split_dim_plot
 from .tab30 import tab30
 __all__ = [
@@ -18,6 +18,7 @@ __all__ = [
     "plot_cluster_distribution",
     "plot_cluster_trends",
     "plot_enrichment_dotplot",
+    "plot_all_stability_indices",
     "plot_mean_stability_index",
     "plot_score_component_associations",
     "sc_pl_cluster_pies",

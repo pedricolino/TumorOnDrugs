@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ._ica_utils import get_ica_entry, get_ica_matrix
+from ._ica_utils import get_ica_entry, get_ica_matrix, orient_ica_matrix
 
 
 def mstd(
@@ -16,6 +16,9 @@ def mstd(
     *,
     use_highly_variable=True,
     layer=None,
+    use_pca=False,
+    space="gene",
+    center=True,
     fun=None,
     algorithm="picard_ext",
     max_iter=2000,
@@ -26,9 +29,12 @@ def mstd(
 ):
     """Run stabilized ICA over a component-count range and store MSTD results.
 
-    The returned mapping contains fitted sica estimators for immediate follow-up
-    work. Only arrays and scalar metadata are saved to ``adata.uns`` so the
-    AnnData remains writable as an ``.h5ad`` file.
+    Results are saved to ``adata.uns`` using arrays and scalar metadata so the
+    AnnData remains writable as an ``.h5ad`` file. The progress bar is the only
+    output; fitted estimators are not returned. Set ``space="cell"`` to treat
+    cells as features and genes as observations. ``use_pca=True`` is only
+    supported with the default ``space="gene"``. Set ``center=False`` to skip
+    input centering.
     """
     import sica
     from sica.base import StabilizedICA
@@ -39,15 +45,22 @@ def mstd(
         raise ValueError("n_runs must be at least 1.")
     if fun is None:
         fun = "tanh" if "picard" in algorithm else "logcosh"
+    if use_pca and space != "gene":
+        raise ValueError("use_pca=True is only supported with space='gene'.")
 
     matrix, _ = get_ica_matrix(
-        adata, use_highly_variable=use_highly_variable, layer=layer
+        adata,
+        use_highly_variable=use_highly_variable,
+        layer=layer,
+        use_pca=use_pca,
+        center=center,
     )
-    max_supported = min(matrix.shape[0] - 1, matrix.shape[1])
+    oriented_matrix = orient_ica_matrix(matrix, space)
+    max_supported = min(oriented_matrix.shape[0] - 1, oriented_matrix.shape[1])
     if M > max_supported:
         raise ValueError(
             f"M={M} exceeds the maximum supported component count "
-            f"({max_supported}) for matrix shape {matrix.shape}."
+            f"({max_supported}) for matrix shape {oriented_matrix.shape}."
         )
     component_counts = np.arange(m, M + 1, step, dtype=int)
     if component_counts[-1] != M:
@@ -66,16 +79,15 @@ def mstd(
     else:
         component_iterator = component_counts
     whitened, _ = sica.base.whitening(
-        matrix.T,
+        oriented_matrix.T,
         n_components=int(component_counts[-1]),
         svd_solver="auto",
         chunked=False,
         chunk_size=None,
-        zero_center=True,
+        zero_center=center,
         random_state=random_state,
     )
 
-    fitted = {}
     stability_rows = []
     for count in component_iterator:
         estimator = StabilizedICA(
@@ -95,7 +107,6 @@ def mstd(
                 "StabilizedICA returned an unexpected stability-index shape "
                 f"{stability.shape} for {count} components."
             )
-        fitted[int(count)] = estimator
         stability_rows.append(stability)
 
     stored_stability = np.full((len(component_counts), M), np.nan, dtype=np.float64)
@@ -118,6 +129,9 @@ def mstd(
             "n_runs": int(n_runs),
             "use_highly_variable": bool(use_highly_variable),
             "layer": "" if layer is None else str(layer),
+            "use_pca": bool(use_pca),
+            "space": space,
+            "center": bool(center),
             "fun": str(fun),
             "algorithm": str(algorithm),
             "max_iter": int(max_iter),
@@ -126,7 +140,6 @@ def mstd(
         },
     }
     adata.uns[key_added] = entry
-    return fitted
 
 
 def select_stable_components(adata, min_stability=0.8, *, key_added="ica"):
@@ -142,40 +155,44 @@ def select_stable_components(adata, min_stability=0.8, *, key_added="ica"):
     return np.flatnonzero(stability >= min_stability) + 1
 
 
-def select_mstd_components(adata, last_n=10, *, key_added="ica"):
-    """Suggest a dimension using the pooled-stability inflection heuristic.
-
-    This reproduces the notebook heuristic: find the largest gap among pooled
-    stability indexes from the highest tested dimensions, then choose the
-    largest tested dimension whose median stability is at least that cutoff.
-    Returns ``None`` when no tested dimension meets the cutoff.
-    """
+def select_mstd_components(adata, last_n=None, *, key_added="ica"):
     entry = adata.uns.get(key_added)
     mstd_result = entry.get("mstd") if isinstance(entry, dict) else None
     if not isinstance(mstd_result, dict):
         raise KeyError(f"No MSTD results are stored in adata.uns[{key_added!r}].")
+    if last_n is None:
+        last_n = len(mstd_result["component_counts"])
     if last_n < 1:
         raise ValueError("last_n must be at least 1.")
 
     component_counts = np.asarray(mstd_result["component_counts"], dtype=int)
     stability = np.asarray(mstd_result["stability_indexes"], dtype=np.float64)
+
     if stability.ndim != 2 or stability.shape[0] != len(component_counts):
         raise ValueError("Stored MSTD stability results have an invalid shape.")
-    selected_rows = stability[-min(last_n, len(component_counts)) :]
-    pooled = selected_rows[np.isfinite(selected_rows)]
-    if pooled.size < 2:
-        raise ValueError("At least two finite stability indexes are required.")
-    ordered = np.sort(pooled)
-    cutoff = float(ordered[np.argmax(np.diff(ordered))])
-    medians = np.nanmedian(stability, axis=1)
-    matching = np.flatnonzero(medians >= cutoff)
 
-    mstd_result["inflection_threshold"] = cutoff
-    if matching.size == 0:
-        mstd_result["selected_n_components"] = -1
-        adata.uns[key_added] = entry
-        return None
-    selected = int(component_counts[matching[-1]])
+    order = np.argsort(component_counts)
+    component_counts = component_counts[order]
+    stability = stability[order]
+
+    medians = np.nanmedian(stability, axis=1)
+
+    # Use only the tail of the curve if that's what your heuristic intends
+    tail = medians[-min(last_n, len(medians)):]
+    x = component_counts[-len(tail):]
+
+    if len(tail) < 2:
+        raise ValueError("At least two stability points are required.")
+
+    # Elbow = point with largest drop in the median curve
+    drops = -np.diff(tail)
+    elbow_idx = int(np.argmax(drops))  # index before largest drop
+    selected = int(x[elbow_idx])
+
+    mstd_result["optimal_n_compt"] = selected
     mstd_result["selected_n_components"] = selected
+    mstd_result["selected_median_stability"] = float(tail[elbow_idx])
+    # useful for plotting the elbow:
+    mstd_result["selected_stability_drop"] = float(drops[elbow_idx])
     adata.uns[key_added] = entry
     return selected

@@ -11,15 +11,46 @@ def plot_score_component_associations(
     key_added="ica",
     component_label=None,
     correlation_threshold=0.3,
-    mutual_info_threshold=0.3,
+    mutual_info_threshold=None,
     figsize=None,
 ):
     """Plot whichever correlation and mutual-information metrics are stored.
 
     Associations must first be computed with
     :func:`tumor_on_drugs.pp.compute_score_component_associations`.
+    The selected thresholds are stored with the score association for later
+    use by :func:`tumor_on_drugs.pp.drop_components_from_embedding`.
+    Mutual-information thresholding is disabled by default.
     """
     import matplotlib.pyplot as plt
+
+    def validate_threshold(value, name, *, maximum=None):
+        if value is None:
+            return None
+        if isinstance(value, (bool, np.bool_)):
+            raise ValueError(f"{name} must be a finite non-negative number or None.")
+        try:
+            value = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{name} must be a finite non-negative number or None."
+            ) from exc
+        if not np.isfinite(value) or value < 0 or (
+            maximum is not None and value > maximum
+        ):
+            if maximum is None:
+                expectation = "finite and non-negative"
+            else:
+                expectation = f"between 0 and {maximum:g}"
+            raise ValueError(f"{name} must be {expectation}, or None.")
+        return value
+
+    correlation_threshold = validate_threshold(
+        correlation_threshold, "correlation_threshold", maximum=1
+    )
+    mutual_info_threshold = validate_threshold(
+        mutual_info_threshold, "mutual_info_threshold"
+    )
 
     entry = adata.uns.get(key_added)
     associations = entry.get("associations") if isinstance(entry, dict) else None
@@ -63,9 +94,28 @@ def plot_score_component_associations(
         raise ValueError(
             f"Stored associations for {score_key!r} contain no plottable metrics."
         )
+    if correlation_threshold is not None and "correlation" not in stored:
+        raise ValueError(
+            f"No correlation values are stored for score {score_key!r}."
+        )
+    if mutual_info_threshold is not None and "mutual_info" not in stored:
+        raise ValueError(
+            f"No mutual-information values are stored for score {score_key!r}."
+        )
     if "p_value" in stored:
         table["p_value"] = np.asarray(stored["p_value"], dtype=float)
     frame = pd.DataFrame(table).sort_values("pc_index")
+
+    entry = dict(entry)
+    associations = dict(associations)
+    stored = dict(stored)
+    stored["thresholds"] = {
+        "correlation_threshold": correlation_threshold,
+        "mutual_info_threshold": mutual_info_threshold,
+    }
+    associations[score_key] = stored
+    entry["associations"] = associations
+    adata.uns[key_added] = entry
 
     if figsize is None:
         figsize = (6 * len(available_metrics), 4)
@@ -74,7 +124,7 @@ def plot_score_component_associations(
     for axis, (metric, threshold, label) in zip(axes, available_metrics):
         values = frame[metric].to_numpy(dtype=float)
         colors = np.full(len(values), "#2c7bb6", dtype=object)
-        if "p_value" in frame:
+        if threshold is not None and "p_value" in frame:
             significant = (frame["p_value"].to_numpy(dtype=float) < 0.05) & (
                 values >= threshold
             )
@@ -86,18 +136,21 @@ def plot_score_component_associations(
             edgecolor="white",
             linewidth=0.5,
         )
-        axis.axhline(
-            threshold,
-            color="grey",
-            linestyle="--",
-            linewidth=1,
-            label=f"{label} = {threshold:g}",
-        )
+        if threshold is not None:
+            axis.axhline(
+                threshold,
+                color="grey",
+                linestyle="--",
+                linewidth=1,
+                label=f"{label} = {threshold:g}",
+            )
         axis.set_ylabel(label)
+        axis.set_ylim(0, 1)
         axis.set_title(f"{score_key} vs {component_label}s")
         axis.set_xticks(np.arange(len(frame)))
         axis.set_xticklabels(frame["component"], rotation=45, ha="right", fontsize=8)
-        axis.legend(fontsize=8)
+        if threshold is not None:
+            axis.legend(fontsize=8)
         axis.spines[["top", "right"]].set_visible(False)
         axis.grid(False)
     fig.tight_layout()

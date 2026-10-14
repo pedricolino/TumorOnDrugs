@@ -3,7 +3,12 @@
 import numpy as np
 import pandas as pd
 
-from ._ica_utils import get_ica_matrix, get_ica_entry, store_string_array
+from ._ica_utils import (
+    get_ica_entry,
+    get_ica_matrix,
+    orient_ica_matrix,
+    store_string_array,
+)
 
 
 def ica_single_run(
@@ -11,6 +16,7 @@ def ica_single_run(
     n_comps=30,
     use_highly_variable=True,
     layer=None,
+    space="gene",
     key_added="ica",
     random_state=0,
     max_iter=500,
@@ -18,15 +24,18 @@ def ica_single_run(
     n_top_genes=20,
     copy=False,
 ):
-    """Fit scikit-learn FastICA once and store scores, loadings, and metadata."""
+    """Fit FastICA once, treating genes or cells as ICA features."""
     from sklearn.decomposition import FastICA
 
     ad = adata.copy() if copy else adata
     matrix, feature_mask = get_ica_matrix(
         ad, use_highly_variable=use_highly_variable, layer=layer
     )
-    if n_comps < 1 or n_comps > min(matrix.shape):
-        raise ValueError(f"n_comps must be between 1 and {min(matrix.shape)}.")
+    oriented_matrix = orient_ica_matrix(matrix, space)
+    if n_comps < 1 or n_comps > min(oriented_matrix.shape):
+        raise ValueError(
+            f"n_comps must be between 1 and {min(oriented_matrix.shape)}."
+        )
     if n_top_genes < 1:
         raise ValueError("n_top_genes must be at least 1.")
 
@@ -36,21 +45,27 @@ def ica_single_run(
         max_iter=max_iter,
         tol=tol,
     )
-    scores = model.fit_transform(matrix)
+    scores = model.fit_transform(oriented_matrix)
     loadings = model.components_.T
     genes_used = ad.var_names[feature_mask]
+    if space == "gene":
+        cell_values = scores
+        gene_values = loadings
+    else:
+        cell_values = loadings
+        gene_values = scores
     component_names = [f"IC{i + 1}" for i in range(n_comps)]
-    ad.obsm[f"X_{key_added}"] = scores
-    full_loadings = np.full((ad.n_vars, n_comps), np.nan, dtype=np.float64)
-    full_loadings[feature_mask, :] = loadings
-    ad.varm[f"{key_added}_components"] = full_loadings
+    ad.obsm[f"X_{key_added}"] = cell_values
+    full_gene_values = np.full((ad.n_vars, n_comps), np.nan, dtype=np.float64)
+    full_gene_values[feature_mask, :] = gene_values
+    ad.varm[f"{key_added}_components"] = full_gene_values
 
     positive = np.full((n_comps, n_top_genes), "", dtype=object)
     negative = np.full_like(positive, "")
     positive_values = np.full((n_comps, n_top_genes), np.nan)
     negative_values = np.full_like(positive_values, np.nan)
     for index in range(n_comps):
-        values = pd.Series(loadings[:, index], index=genes_used)
+        values = pd.Series(gene_values[:, index], index=genes_used)
         top = values.nlargest(min(n_top_genes, len(values)))
         bottom = values.nsmallest(min(n_top_genes, len(values)))
         positive[index, : len(top)] = top.index.astype(str)
@@ -65,6 +80,7 @@ def ica_single_run(
             "n_comps": int(n_comps),
             "use_highly_variable": bool(use_highly_variable),
             "layer": "" if layer is None else str(layer),
+            "space": space,
             "random_state": int(random_state),
             "max_iter": int(max_iter),
             "tol": float(tol),
