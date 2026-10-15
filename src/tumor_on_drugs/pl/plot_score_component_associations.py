@@ -8,7 +8,7 @@ def plot_score_component_associations(
     adata,
     score_key=None,
     *,
-    key_added="ica",
+    key_added=None,
     component_label=None,
     correlation_threshold=0.3,
     mutual_info_threshold=None,
@@ -18,6 +18,8 @@ def plot_score_component_associations(
 
     Associations must first be computed with
     :func:`tumor_on_drugs.pp.compute_score_component_associations`.
+    When ``key_added`` is omitted, the stored entry is inferred from ``score_key``;
+    if the score exists under multiple ``adata.uns`` keys, specify ``key_added``.
     The selected thresholds are stored with the score association for later
     use by :func:`tumor_on_drugs.pp.drop_components_from_embedding`.
     Mutual-information thresholding is disabled by default.
@@ -51,6 +53,41 @@ def plot_score_component_associations(
     mutual_info_threshold = validate_threshold(
         mutual_info_threshold, "mutual_info_threshold"
     )
+
+    if key_added is None:
+        candidates = []
+        for uns_key, value in adata.uns.items():
+            stored_associations = (
+                value.get("associations") if isinstance(value, dict) else None
+            )
+            if not isinstance(stored_associations, dict):
+                continue
+            if score_key is None:
+                candidates.extend(
+                    (uns_key, candidate_score)
+                    for candidate_score in stored_associations
+                )
+            elif score_key in stored_associations:
+                candidates.append((uns_key, score_key))
+        if not candidates:
+            raise KeyError(
+                "No matching score associations were found; compute them with "
+                "pp.compute_score_component_associations first."
+            )
+        if len(candidates) > 1:
+            candidate_keys = {candidate_key for candidate_key, _ in candidates}
+            if len(candidate_keys) > 1:
+                raise ValueError(
+                    "Associations are available under multiple adata.uns keys; "
+                    "specify score_key and key_added."
+                )
+            raise ValueError(
+                "score_key must be specified when multiple score associations "
+                "are stored."
+            )
+        key_added, inferred_score_key = candidates[0]
+        if score_key is None:
+            score_key = inferred_score_key
 
     entry = adata.uns.get(key_added)
     associations = entry.get("associations") if isinstance(entry, dict) else None

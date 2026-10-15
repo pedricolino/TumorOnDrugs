@@ -23,7 +23,9 @@ def test_scanpy_style_modules_expose_classified_helpers():
 
 def test_notebook_helpers_are_package_exports():
     assert callable(pp.drop_components_from_embedding)
-    assert callable(pp.ica)
+    assert callable(pp.robustica)
+    assert callable(pp.stabilized_ica)
+    assert not hasattr(pp, "ica")
     assert callable(pl.color_cells)
     assert callable(tl.compute_condition_network)
     assert callable(tl.build_ego_graph)

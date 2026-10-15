@@ -12,7 +12,7 @@ from ._ica_utils import (
 )
 
 
-def ica(
+def stabilized_ica(
     adata,
     n_comps=None,
     n_runs=30,

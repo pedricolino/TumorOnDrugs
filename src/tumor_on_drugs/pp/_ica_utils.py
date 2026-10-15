@@ -96,5 +96,9 @@ def get_ica_entry(adata, key_added):
     return dict(value) if isinstance(value, dict) else {}
 
 
+def association_key_for_embedding(embedding_key):
+    return "pca" if "pca" in embedding_key.lower() else "ica"
+
+
 def store_string_array(values):
     return np.asarray(values, dtype=str)

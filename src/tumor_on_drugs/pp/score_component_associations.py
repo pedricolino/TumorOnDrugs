@@ -6,7 +6,11 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from ._ica_utils import get_ica_entry, store_string_array
+from ._ica_utils import (
+    association_key_for_embedding,
+    get_ica_entry,
+    store_string_array,
+)
 
 
 def compute_score_component_associations(
@@ -18,12 +22,14 @@ def compute_score_component_associations(
     compute_mutual_info=True,
     n_neighbors=3,
     random_state=0,
-    key_added="ica",
+    key_added=None,
 ):
     """Compute component-wise correlations and optional mutual information.
 
     Results are returned as a DataFrame and persisted as arrays under
     ``adata.uns[key_added]['associations'][score_key]`` for H5AD compatibility.
+    By default, ``key_added`` is inferred from ``embedding_key``: PCA
+    embeddings use ``'pca'`` and other embeddings use ``'ica'``.
     """
     if score_key not in adata.obs:
         raise KeyError(f"Score {score_key!r} was not found in adata.obs.")
@@ -76,6 +82,8 @@ def compute_score_component_associations(
     if mutual_info is not None:
         frame["mutual_info"] = mutual_info
 
+    if key_added is None:
+        key_added = association_key_for_embedding(embedding_key)
     entry = get_ica_entry(adata, key_added)
     associations = dict(entry.get("associations", {}))
     stored = {

@@ -19,11 +19,80 @@ def test_mstd_defaults_use_picard_ext_and_all_jobs():
     assert parameters["show_progress"].default is True
     assert parameters["use_pca"].default is False
     assert parameters["center"].default is True
-    ica_parameters = inspect.signature(pp.ica).parameters
+    ica_parameters = inspect.signature(pp.stabilized_ica).parameters
     assert ica_parameters["n_comps"].default is None
     assert ica_parameters["verbose"].default is True
     assert ica_parameters["use_pca"].default is False
     assert ica_parameters["center"].default is True
+
+
+def test_robustica_passes_estimator_options_and_stores_returned_components(
+    monkeypatch, tmp_path
+):
+    from types import ModuleType
+
+    adata = make_adata(n_obs=20, n_vars=8, seed=13)
+    pca_scores = np.arange(80, dtype=float).reshape(20, 4)
+    pca_loadings = np.arange(32, dtype=float).reshape(8, 4)
+    adata.obsm["X_pca"] = pca_scores
+    adata.varm["PCs"] = pca_loadings
+    returned_scores = np.arange(40, dtype=float).reshape(20, 2)
+    returned_loadings = np.arange(8, dtype=float).reshape(4, 2)
+    constructor_kwargs = []
+    fitted_matrices = []
+
+    class FakeRobustICA:
+        def __init__(self, **kwargs):
+            constructor_kwargs.append(kwargs)
+
+        def fit_transform(self, matrix):
+            fitted_matrices.append(matrix.copy())
+            return returned_scores, returned_loadings
+
+    robustica_module = ModuleType("robustica")
+    robustica_module.RobustICA = FakeRobustICA
+    monkeypatch.setitem(sys.modules, "robustica", robustica_module)
+
+    result = pp.robustica(
+        adata,
+        n_comps=4,
+        use_pca=True,
+        center=False,
+        n_top_genes=3,
+        verbose=False,
+        robust_runs=7,
+        robust_method="KMeans",
+        robust_kws={"n_clusters": 5},
+        random_state=19,
+    )
+
+    assert result is None
+    assert constructor_kwargs == [
+        {
+            "n_components": 4,
+            "robust_runs": 7,
+            "robust_method": "KMeans",
+            "robust_kws": {"n_clusters": 5},
+            "random_state": 19,
+            "verbose": False,
+        }
+    ]
+    np.testing.assert_array_equal(fitted_matrices[0], pca_scores)
+    assert adata.obsm["X_ica"].shape == (adata.n_obs, 2)
+    assert adata.varm["ICs"].shape == (adata.n_vars, 2)
+    np.testing.assert_array_equal(
+        adata.varm["ICs"], pca_loadings @ returned_loadings
+    )
+    assert adata.uns["ica"]["params"]["method"] == "robustica"
+    assert adata.uns["ica"]["params"]["n_comps"] == 2
+    assert adata.uns["ica"]["params"]["requested_n_comps"] == 4
+    assert adata.uns["ica"]["params"]["robust_kws"] == {"n_clusters": 5}
+    assert adata.uns["ica"]["top_genes_positive"].shape == (2, 3)
+    output = tmp_path / "robustica.h5ad"
+    adata.write_h5ad(output, compression="gzip")
+    reopened = anndata.read_h5ad(output)
+    assert reopened.obsm["X_ica"].shape == (adata.n_obs, 2)
+    assert reopened.uns["ica"]["params"]["requested_n_comps"] == 4
 
 
 def test_get_ica_matrix_converts_sparse_scalar_entries():
@@ -138,11 +207,12 @@ def test_ica_pca_input_projects_loadings_back_to_genes(monkeypatch):
     sica_module = ModuleType("sica")
     base_module = ModuleType("sica.base")
     base_module.StabilizedICA = FakeStabilizedICA
+    base_module.whitening = lambda *args, **kwargs: None
     sica_module.base = base_module
     monkeypatch.setitem(sys.modules, "sica", sica_module)
     monkeypatch.setitem(sys.modules, "sica.base", base_module)
 
-    pp.ica(
+    pp.stabilized_ica(
         adata,
         n_comps=2,
         use_pca=True,
@@ -189,15 +259,17 @@ def test_ica_cell_space_stores_cell_and_gene_values_on_matching_axes(monkeypatch
     sica_module = ModuleType("sica")
     base_module = ModuleType("sica.base")
     base_module.StabilizedICA = FakeStabilizedICA
+    base_module.whitening = lambda *args, **kwargs: None
     sica_module.base = base_module
     monkeypatch.setitem(sys.modules, "sica", sica_module)
     monkeypatch.setitem(sys.modules, "sica.base", base_module)
 
-    pp.ica(
+    pp.stabilized_ica(
         adata,
         n_comps=2,
         use_highly_variable=False,
         space="cell",
+        center=False,
         n_top_genes=2,
         verbose=False,
     )
@@ -205,7 +277,7 @@ def test_ica_cell_space_stores_cell_and_gene_values_on_matching_axes(monkeypatch
     np.testing.assert_array_equal(fitted_matrices[0], adata.X)
     np.testing.assert_array_equal(transformed_matrices[0], adata.X)
     np.testing.assert_array_equal(
-        adata.obsm["X_ica"], np.arange(8, dtype=float).reshape(4, 2)
+        adata.obsm["X_ica"], np.arange(8, dtype=float).reshape(2, 4).T
     )
     np.testing.assert_array_equal(
         adata.varm["ICs"], np.array([[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]])
@@ -253,7 +325,7 @@ def test_ica_without_estimator_whitening_prewhitens_to_component_count(monkeypat
     monkeypatch.setitem(sys.modules, "sica", sica_module)
     monkeypatch.setitem(sys.modules, "sica.base", base_module)
 
-    pp.ica(
+    pp.stabilized_ica(
         adata,
         n_comps=2,
         use_highly_variable=False,
@@ -332,7 +404,10 @@ def make_adata(n_obs=60, n_vars=12, seed=0):
 def test_public_ica_definitions_are_in_python_modules():
     import inspect
 
-    assert inspect.getsourcefile(pp.ica).endswith("/pp/ica.py")
+    assert inspect.getsourcefile(pp.stabilized_ica).endswith(
+        "/pp/stabilized_ica.py"
+    )
+    assert inspect.getsourcefile(pp.robustica).endswith("/pp/robustica.py")
     assert inspect.getsourcefile(pp.ica_single_run).endswith("/pp/ica_single_run.py")
     assert inspect.getsourcefile(pl.plot_score_component_associations).endswith(
         "/pl/plot_score_component_associations.py"
@@ -449,7 +524,7 @@ def test_stabilized_ica_and_mstd_store_h5ad_compatible_results(tmp_path, capsys)
 
     plt.close(fig)
 
-    pp.ica(
+    pp.stabilized_ica(
         adata,
         n_runs=2,
         algorithm="fastica_par",
@@ -476,7 +551,7 @@ def test_stabilized_ica_and_mstd_store_h5ad_compatible_results(tmp_path, capsys)
     )
     plt.close(fig)
 
-    pp.ica(
+    pp.stabilized_ica(
         adata,
         n_comps=3,
         n_runs=2,
@@ -629,6 +704,73 @@ def test_score_associations_plot_available_metrics_and_roundtrip(tmp_path):
     assert reopened.uns["ica"]["associations"]["score"]["thresholds"][
         "mutual_info_threshold"
     ] is None
+
+
+def test_pca_associations_use_pca_storage_and_are_found_by_plot_and_drop():
+    adata = make_adata(n_obs=80, n_vars=8, seed=41)
+    rng = np.random.default_rng(42)
+    score = np.linspace(-1, 1, adata.n_obs)
+    adata.obs["score"] = score
+    pca_embedding = np.column_stack([score, rng.normal(size=adata.n_obs)])
+    adata.obsm["X_pca"] = pca_embedding
+    adata.obsm["pca"] = pca_embedding
+
+    pp.compute_score_component_associations(
+        adata,
+        "score",
+        embedding_key="X_pca",
+        compute_mutual_info=False,
+    )
+
+    stored = adata.uns["pca"]["associations"]["score"]
+    assert stored["embedding_key"] == "X_pca"
+    assert "associations" not in adata.uns.get("ica", {})
+
+    fig, _ = pl.plot_score_component_associations(
+        adata,
+        "score",
+        correlation_threshold=0.99,
+        mutual_info_threshold=None,
+    )
+    import matplotlib.pyplot as plt
+
+    plt.close(fig)
+    assert adata.uns["pca"]["associations"]["score"]["thresholds"] == {
+        "correlation_threshold": 0.99,
+        "mutual_info_threshold": None,
+    }
+
+    keys = pp.drop_components_from_embedding(
+        adata,
+        score_keys=["score"],
+        base_obsm_key="X_pca",
+        base_varm_key="missing_loadings",
+    )
+    assert keys["obsm"] == "X_pca_no_components_1"
+    np.testing.assert_array_equal(
+        adata.obsm[keys["obsm"]], pca_embedding[:, 1:]
+    )
+
+    adata.obsm["X_ica"] = pca_embedding
+    pp.compute_score_component_associations(
+        adata,
+        "score",
+        compute_mutual_info=False,
+    )
+    with pytest.raises(ValueError, match="multiple adata.uns keys"):
+        pl.plot_score_component_associations(adata, "score")
+    fig, _ = pl.plot_score_component_associations(
+        adata, "score", key_added="pca"
+    )
+    plt.close(fig)
+
+    pp.compute_score_component_associations(
+        adata,
+        "score",
+        embedding_key="pca",
+        compute_mutual_info=False,
+    )
+    assert adata.uns["pca"]["associations"]["score"]["embedding_key"] == "pca"
 
 
 def test_component_clustering_and_gene_redundancy():

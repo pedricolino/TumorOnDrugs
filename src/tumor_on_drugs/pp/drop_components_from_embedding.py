@@ -2,6 +2,8 @@
 
 import numpy as np
 
+from ._ica_utils import association_key_for_embedding
+
 
 def drop_components_from_embedding(
     adata,
@@ -10,9 +12,9 @@ def drop_components_from_embedding(
     correlation_threshold=None,
     mutual_info_threshold=None,
     score_keys=None,
-    key_added="ica",
+    key_added=None,
     base_obsm_key="X_ica",
-    pca_uns_key="ica",
+    pca_uns_key="auto",
     base_varm_key="ICs",
     new_suffix=None,
     assume_one_indexed=True,
@@ -23,8 +25,13 @@ def drop_components_from_embedding(
     stored score-association thresholds. If both cutoff arguments are omitted,
     saved plotting thresholds are used; otherwise, only the explicitly supplied
     cutoffs are used. Correlation and mutual-information cutoffs are combined
-    with OR; MI is not used unless a cutoff is set.
+    with OR; MI is not used unless a cutoff is set. When ``key_added`` is
+    omitted, the association entry is inferred from ``base_obsm_key``.
     """
+    if key_added is None:
+        key_added = association_key_for_embedding(base_obsm_key)
+    if pca_uns_key == "auto":
+        pca_uns_key = association_key_for_embedding(base_obsm_key)
     if base_obsm_key not in adata.obsm:
         raise ValueError(f"'{base_obsm_key}' not found in adata.obsm.")
     base_embed = adata.obsm[base_obsm_key]
